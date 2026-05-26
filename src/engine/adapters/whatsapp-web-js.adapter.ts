@@ -57,12 +57,18 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
   private phoneNumber: string | null = null;
   private pushName: string | null = null;
   private callbacks: EngineEventCallbacks = {};
+  private selfIds = new Set<string>(
+    (process.env.SELF_LIDS || '').split(',').map((s) => s.replace(/\D/g, '')).filter(Boolean),
+  ); // self-chat ids = our own LID(s) (set SELF_LIDS to enable; the account's plain number is added on 'ready')
 
   constructor(private readonly config: WhatsAppWebJsConfig) {
     super();
   }
 
   private readonly logger = createLogger('WhatsAppWebJsAdapter');
+
+  // self-chat ids are seeded from SELF_LIDS + the account's own number on 'ready'
+  // (we avoid client.getContacts() here because it hangs when called right after a session resume)
 
   async initialize(callbacks: EngineEventCallbacks): Promise<void> {
     this.callbacks = callbacks;
@@ -132,6 +138,8 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         this.phoneNumber = info?.wid?.user || null;
         this.pushName = info?.pushname || null;
         this.setStatus(EngineStatus.READY);
+        if (this.phoneNumber) this.selfIds.add(this.phoneNumber.replace(/\D/g, '')); // add own number to self-chat ids
+        this.logger.log(`self-chat ids: ${[...this.selfIds].join(',')}`);
         this.callbacks.onReady?.(this.phoneNumber || '', this.pushName || '');
       } catch (error) {
         this.logger.error('Error getting client info', String(error));
@@ -187,6 +195,35 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         this.callbacks.onMessage?.(incomingMessage);
       } catch (error) {
         this.logger.error('Error processing incoming message', String(error));
+      }
+    });
+
+    // Self-chat test mode: forward the operator's own "Message yourself" messages so the AI can
+    // reply there. Tightly scoped to the self-chat ONLY (never your real chats with other people),
+    // and skips the bot's own '--AI'-tagged replies so it can't loop.
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises
+    this.client.on('message_create', async msg => {
+      try {
+        if (!msg.fromMe) return; // incoming is handled by the 'message' listener
+        const digits = (s: unknown): string => String(s || '').replace(/\D/g, '');
+        if (!this.selfIds.has(digits(msg.to))) return; // ONLY the self-chat (your own number OR its LID)
+        if ((msg.body || '').trimEnd().endsWith('--AI')) return; // don't react to our own replies
+        const selfNum = digits(this.client?.info?.wid?._serialized);
+        this.logger.log(`self-chat message -> forwarding (to=${msg.to})`);
+        const selfMessage: IncomingMessage = {
+          id: msg.id._serialized,
+          from: selfNum + '@c.us',
+          to: selfNum + '@c.us',
+          chatId: selfNum + '@c.us',
+          body: msg.body,
+          type: msg.type,
+          timestamp: msg.timestamp,
+          fromMe: false, // present as incoming so the bridge processes it
+          isGroup: false,
+        };
+        this.callbacks.onMessage?.(selfMessage);
+      } catch (error) {
+        this.logger.error('Error processing self message', String(error));
       }
     });
 

@@ -1,0 +1,42 @@
+# Local override:
+#  - NAS Docker default address pools are exhausted, so pin a free subnet.
+#  - Add the auto-responder bridge (OpenWA webhook -> Gemini -> reply), allow-listed.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.123.0.0/24
+
+services:
+  bridge:
+    build: ./bridge
+    container_name: openwa-bridge
+    restart: unless-stopped
+    environment:
+      - PORT=8090
+      - OPENWA_BASE=http://openwa-api:2785/api
+      - OPENWA_API_KEY=${BRIDGE_OPENWA_API_KEY:-}
+      - OPENWA_SESSION_ID=${BRIDGE_SESSION_ID:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_API_KEYS=${GEMINI_API_KEYS:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      - ALLOWED_NUMBERS=${ALLOWED_NUMBERS:-}
+      - SYSTEM_PROMPT=${BRIDGE_SYSTEM_PROMPT:-}
+      # persona: name a file in personas/ (PERSONA=alex -> personas/alex.json); blank falls back to SYSTEM_PROMPT
+      - PERSONA=${PERSONA:-}
+      - TIMEZONE=${TIMEZONE:-}
+      - SELF_NUMBER=${SELF_NUMBER:-}
+      # long-term memory (RAG) — optional; defaults baked into server.js
+      - EMBED_ENABLED=${EMBED_ENABLED:-1}
+      - EMBED_MODEL=${EMBED_MODEL:-gemini-embedding-001}
+      - EMBED_DIM=${EMBED_DIM:-768}
+      - RETRIEVE_K=${RETRIEVE_K:-4}
+      - RETRIEVE_MIN_SCORE=${RETRIEVE_MIN_SCORE:-0.5}
+      - RETRIEVE_ROLES=${RETRIEVE_ROLES:-user}
+      - HISTORY_TTL_MIN=${HISTORY_TTL_MIN:-120}
+      - EMBED_MAX_CHARS=${EMBED_MAX_CHARS:-8000}
+    volumes:
+      - ./bridge-data:/data
+      - ./personas:/personas:ro
+    depends_on:
+      - openwa-api

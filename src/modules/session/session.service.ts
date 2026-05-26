@@ -9,6 +9,7 @@ import {
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, In, DataSource } from 'typeorm';
 import { Session, SessionStatus } from './entities/session.entity';
+import { Message, MessageDirection, MessageStatus } from '../message/entities/message.entity';
 import { CreateSessionDto } from './dto';
 import { EngineFactory } from '../../engine/engine.factory';
 import { IWhatsAppEngine, EngineStatus } from '../../engine/interfaces/whatsapp-engine.interface';
@@ -291,6 +292,25 @@ export class SessionService implements OnModuleDestroy, OnModuleInit {
         });
         // Update last active timestamp
         void this.sessionRepository.update(id, { lastActiveAt: new Date() });
+        // Persist the incoming message so conversations are queryable in the DB
+        // (the gateway previously saved outgoing messages only).
+        const msgRepo = this.dataSource.getRepository(Message);
+        void msgRepo
+          .save(
+            msgRepo.create({
+              sessionId: id,
+              waMessageId: message.id,
+              chatId: message.chatId,
+              from: message.from,
+              to: message.to,
+              body: message.body,
+              type: message.type,
+              direction: MessageDirection.INCOMING,
+              timestamp: message.timestamp,
+              status: MessageStatus.DELIVERED,
+            }),
+          )
+          .catch((e) => this.logger.error('Failed to save incoming message', String(e)));
         // Convert IncomingMessage to plain object for dispatch
         const messageData = { ...message };
 

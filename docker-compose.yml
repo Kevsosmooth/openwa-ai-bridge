@@ -9,7 +9,7 @@ services:
     profiles: ['with-proxy', 'full']
     restart: unless-stopped
     ports:
-      - '127.0.0.1:${DASHBOARD_PORT:-2886}:80'
+      - '${BIND_HOST:-127.0.0.1}:${DASHBOARD_PORT:-2886}:80'
       - '127.0.0.1:8080:8080' # Traefik dashboard
     volumes:
       - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
@@ -45,6 +45,7 @@ services:
       # Engine
       - ENGINE_TYPE=${ENGINE_TYPE:-whatsapp-web.js}
       - SESSION_DATA_PATH=/app/data/sessions
+      - SELF_LIDS=${SELF_LIDS:-}
       - PUPPETEER_HEADLESS=${PUPPETEER_HEADLESS:-true}
       - PUPPETEER_ARGS=${PUPPETEER_ARGS:---no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage,--disable-gpu}
       # Storage

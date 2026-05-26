@@ -43,6 +43,16 @@ Built on a **pluggable architecture**, OpenWA lets you swap database engines (SQ
 
 ---
 
+## 🤖 AI Auto-Responder
+
+This deployment also includes an **AI auto-responder** layer (the "bridge") that replies to
+your WhatsApp contacts **in your own voice**, with short- and long-term memory and a
+configurable persona, powered by Google Gemini. It runs alongside the gateway.
+
+**→ [SETUP.md](./SETUP.md)** — stand up your own bot &nbsp;·&nbsp; **[personas/README.md](./personas/README.md)** — define its voice
+
+---
+
 ## 🎯 Features
 
 ### Core Features
@@ -98,8 +108,8 @@ Built on a **pluggable architecture**, OpenWA lets you swap database engines (SQ
 
 ```bash
 # Clone and start
-git clone https://github.com/rmyndharis/OpenWA.git
-cd OpenWA
+git clone https://github.com/Kevsosmooth/openwa-ai-bridge.git
+cd openwa-ai-bridge
 docker compose -f docker-compose.dev.yml up -d
 
 # Access
@@ -112,8 +122,8 @@ docker compose -f docker-compose.dev.yml up -d
 
 ```bash
 # Clone repository
-git clone https://github.com/rmyndharis/OpenWA.git
-cd OpenWA
+git clone https://github.com/Kevsosmooth/openwa-ai-bridge.git
+cd openwa-ai-bridge
 
 # Install dependencies (includes dashboard)
 npm install
@@ -273,6 +283,7 @@ Comprehensive documentation is available in the `docs/` folder:
 
 | Document                                                | Description                  |
 | ------------------------------------------------------- | ---------------------------- |
+| [Self-Hosting Setup](./SETUP.md)                        | Run your own AI auto-responder |
 | [Project Overview](./docs/01-project-overview.md)       | Introduction and goals       |
 | [Requirements](./docs/02-requirements-specification.md) | Feature specifications       |
 | [Architecture](./docs/03-system-architecture.md)        | System design                |
