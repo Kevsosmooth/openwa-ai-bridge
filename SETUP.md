@@ -95,8 +95,12 @@ cp personas/example.json personas/me.json
 
 Edit `personas/me.json` — set the name, timezone, the voice instructions, and **paste in
 10–20 of your own real text messages** as `examples`. Those samples are the single most
-important thing for sounding human. See [`personas/README.md`](./personas/README.md) for
-how to write a good one.
+important thing for sounding human.
+
+**For the full training process** — interview-style questions (identity, voice/dialect,
+business facts, sample texts) and how to map the answers into the JSON — see
+[`PERSONA-SETUP.md`](./PERSONA-SETUP.md). For shorter field-by-field tips see
+[`personas/README.md`](./personas/README.md).
 
 Then point `.env` at it:
 
@@ -150,6 +154,19 @@ Watch either one live:
 ```bash
 docker compose logs -f openwa-bridge
 ```
+
+**Option C — automated test battery (recommended for tuning).** Once `SELF_NUMBER` is
+set, run the scripted battery — it sends 10 tricky prompts to the bot (as if from you)
+and uses Gemini itself to **judge** each reply against criteria for the classic AI tells
+(length variation, no-question-every-turn, reacts to weird input, no robotic deflection,
+no hallucination, recall accuracy, language mirroring):
+
+```bash
+docker exec openwa-bridge node /tests/persona-battery.js
+```
+
+You'll get a PASS / FAIL per scenario with a one-line reason, plus a total score.
+See [`tests/README.md`](./tests/README.md) for what each test covers.
 
 When it's behaving the way you want, add your real contacts to
 `bridge-data/allowlist.txt` and you're live.

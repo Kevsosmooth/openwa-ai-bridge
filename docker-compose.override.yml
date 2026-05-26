@@ -38,5 +38,6 @@ services:
     volumes:
       - ./bridge-data:/data
       - ./personas:/personas:ro
+      - ./tests:/tests:ro
     depends_on:
       - openwa-api
