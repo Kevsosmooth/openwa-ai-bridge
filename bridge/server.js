@@ -72,10 +72,106 @@ function allowSet() {
 const PAUSE_FILE = '/data/paused';
 function isPaused() {
   try {
-    return fs.existsSync(PAUSE_FILE);
+    if (!fs.existsSync(PAUSE_FILE)) return false;
+    const raw = fs.readFileSync(PAUSE_FILE, 'utf8').trim();
+    if (!raw || raw === 'indefinite') return true; // /pause (no expiry)
+    const until = Date.parse(raw); // /quiet <min> writes an ISO 'until' timestamp here
+    if (Number.isNaN(until)) return true; // unparseable -> treat as indefinite (safe)
+    if (Date.now() >= until) {
+      try { fs.rmSync(PAUSE_FILE, { force: true }); } catch {}
+      log('auto-resume: timed pause expired');
+      return false;
+    }
+    return true;
   } catch {
     return false;
   }
+}
+
+// ---- block-list + list-mode (allow / block / open) ----
+const BLOCK_FILE = '/data/blocklist.txt';
+let _blockCache = { set: new Set(), at: 0 };
+function blockSet() {
+  if (Date.now() - _blockCache.at < 5000) return _blockCache.set;
+  try {
+    const nums = fs.existsSync(BLOCK_FILE)
+      ? fs.readFileSync(BLOCK_FILE, 'utf8').split(/[\s,]+/).map(onlyDigits).filter(Boolean)
+      : [];
+    _blockCache = { set: new Set(nums), at: Date.now() };
+  } catch { _blockCache = { set: new Set(), at: Date.now() }; }
+  return _blockCache.set;
+}
+const MODE_FILE = '/data/list-mode';
+function listMode() {
+  try {
+    if (!fs.existsSync(MODE_FILE)) return 'allow';
+    const m = fs.readFileSync(MODE_FILE, 'utf8').trim().toLowerCase();
+    return ['allow', 'block', 'open'].includes(m) ? m : 'allow';
+  } catch { return 'allow'; }
+}
+function setListMode(m) { try { fs.writeFileSync(MODE_FILE, m + '\n'); } catch {} }
+
+// ---- per-contact pause (human handoff: bot stops replying to one specific number) ----
+const PAUSED_CONTACTS_FILE = '/data/paused-contacts.txt';
+let _pausedContactsCache = { set: new Set(), at: 0 };
+function pausedContacts() {
+  if (Date.now() - _pausedContactsCache.at < 5000) return _pausedContactsCache.set;
+  try {
+    const nums = fs.existsSync(PAUSED_CONTACTS_FILE)
+      ? fs.readFileSync(PAUSED_CONTACTS_FILE, 'utf8').split(/[\s,]+/).map(onlyDigits).filter(Boolean)
+      : [];
+    _pausedContactsCache = { set: new Set(nums), at: Date.now() };
+  } catch { _pausedContactsCache = { set: new Set(), at: Date.now() }; }
+  return _pausedContactsCache.set;
+}
+function addPausedContact(d) {
+  if (!d) return false;
+  if (pausedContacts().has(d)) return false;
+  try { fs.appendFileSync(PAUSED_CONTACTS_FILE, d + '\n'); _pausedContactsCache.at = 0; return true; }
+  catch { return false; }
+}
+function removePausedContact(d) {
+  if (!d || !pausedContacts().has(d)) return false;
+  try {
+    const remaining = [...pausedContacts()].filter((x) => x !== d);
+    fs.writeFileSync(PAUSED_CONTACTS_FILE, remaining.join('\n') + (remaining.length ? '\n' : ''));
+    _pausedContactsCache.at = 0;
+    return true;
+  } catch { return false; }
+}
+
+// ---- allow-list mutation helpers (used by /add and /remove commands) ----
+function addAllowed(d) {
+  if (!d) return false;
+  if (allowSet().has(d)) return false;
+  try { fs.appendFileSync(ALLOW_FILE, d + '\n'); _allowCache.at = 0; return true; }
+  catch { return false; }
+}
+function removeAllowed(d) {
+  if (!d || !allowSet().has(d)) return false;
+  try {
+    const remaining = [...allowSet()].filter((x) => x !== d);
+    fs.writeFileSync(ALLOW_FILE, remaining.join('\n') + (remaining.length ? '\n' : ''));
+    _allowCache.at = 0;
+    return true;
+  } catch { return false; }
+}
+
+// ---- per-contact notes (durable facts you keep about a person, injected into context) ----
+const NOTES_FILE = '/data/notes.json';
+function loadNotes() {
+  try {
+    if (!fs.existsSync(NOTES_FILE)) return {};
+    return JSON.parse(fs.readFileSync(NOTES_FILE, 'utf8'));
+  } catch { return {}; }
+}
+function saveNotes(obj) { try { fs.writeFileSync(NOTES_FILE, JSON.stringify(obj, null, 2) + '\n'); } catch {} }
+function getNote(d) { const n = loadNotes(); return n[d] || ''; }
+function setNote(d, text) {
+  const n = loadNotes();
+  if (!text || !text.trim()) delete n[d];
+  else n[d] = text.trim();
+  saveNotes(n);
 }
 const mask = (n) => '...' + onlyDigits(n).slice(-4);
 const log = (...a) => console.log(new Date().toISOString(), ...a);
@@ -101,14 +197,24 @@ function loadPersona() {
     return fallback;
   }
 }
-const persona = loadPersona();
-// few-shot voice block, built once: example texts as STYLE references, NOT conversation turns
-const FEWSHOT_BLOCK = persona.examples.length
-  ? 'Here are real examples of how YOU text. Match this voice: sentence length, punctuation, ' +
-    'capitalization, emoji use, and slang level. These are STYLE references only, NOT part of the ' +
-    'conversation, so do not reply to them:\n' +
-    persona.examples.map((t) => `- ${t}`).join('\n')
-  : '';
+// few-shot voice block builder (used at startup + after /reload to rebuild without restart)
+function buildFewShotBlock(p) {
+  return p.examples.length
+    ? 'Here are real examples of how YOU text. Match this voice: sentence length, punctuation, ' +
+      'capitalization, emoji use, and slang level. These are STYLE references only, NOT part of the ' +
+      'conversation, so do not reply to them:\n' +
+      p.examples.map((t) => `- ${t}`).join('\n')
+    : '';
+}
+// `let` not `const` so /reload can swap them in place at runtime
+let persona = loadPersona();
+let FEWSHOT_BLOCK = buildFewShotBlock(persona);
+// hot-reload the persona file from disk without restarting the container
+function reloadPersona() {
+  persona = loadPersona();
+  FEWSHOT_BLOCK = buildFewShotBlock(persona);
+  return persona;
+}
 
 // ---- vector math (cosine == dot once vectors are normalized) ----
 function dot(a, b) {
@@ -293,24 +399,142 @@ async function sendWhatsApp(chatId, text) {
 // ---- self-chat command console: the owner texts their OWN number to control the bot ----
 // Only owner messages starting with '/' (or bare help/menu) reach here; everyone else is a normal chat.
 const HELP_TEXT =
-  'Options:\n' +
-  '/pause - stop replying to everyone\n' +
-  '/resume - start replying again\n' +
-  '/help - show this menu';
+  'Commands:\n' +
+  '/help - this menu\n' +
+  '/status - quick health snapshot\n' +
+  '\n' +
+  'On / off:\n' +
+  '/pause [number] - stop replying (everyone, or just that contact)\n' +
+  '/resume [number] - start replying again (everyone, or just that contact)\n' +
+  '/quiet <min> - pause for N minutes, then auto-resume\n' +
+  '\n' +
+  'Contacts & mode:\n' +
+  '/list - who can talk to me right now\n' +
+  '/add <number> - allow a new number\n' +
+  '/remove <number> - stop allowing a number\n' +
+  '/mode allow|block|open - allow-only / block-list / open to all\n' +
+  '\n' +
+  'Per-contact notes:\n' +
+  '/note <number> <text> - save a note about a contact (injected into context)\n' +
+  '/notes <number> - show the saved note\n' +
+  '\n' +
+  'Persona:\n' +
+  '/reload - re-read the persona file without restarting';
+
 async function handleCommand(text, chatId) {
-  const cmd = text.trim().toLowerCase();
+  const trimmed = text.trim();
+  const lower = trimmed.toLowerCase();
+  const sp = trimmed.indexOf(' ');
+  const cmd = (sp === -1 ? trimmed : trimmed.slice(0, sp)).toLowerCase();
+  const arg = sp === -1 ? '' : trimmed.slice(sp + 1).trim();
   let reply;
-  if (cmd === '/help' || cmd === '/?' || cmd === 'help' || cmd === 'menu') {
+
+  if (cmd === '/help' || cmd === '/?' || lower === 'help' || lower === 'menu') {
     reply = HELP_TEXT;
+
+  } else if (cmd === '/status') {
+    const ks = keys.filter((k) => k.availableAt <= Date.now()).length;
+    reply =
+      (isPaused() ? 'PAUSED' : 'live') +
+      ` | mode: ${listMode()}` +
+      ` | allow: ${allowSet().size}` +
+      ` | block: ${blockSet().size}` +
+      ` | paused contacts: ${pausedContacts().size}` +
+      ` | keys: ${ks}/${keys.length}` +
+      ` | vectors: ${vectors.length}` +
+      ` | persona: ${persona.name}`;
+
   } else if (cmd === '/pause' || cmd === '/stop') {
-    try { fs.writeFileSync(PAUSE_FILE, new Date().toISOString() + '\n'); } catch {}
-    reply = "Paused. I won't reply to anyone until you send /resume.";
+    if (arg) {
+      const d = onlyDigits(arg);
+      if (!d) reply = "I couldn't read that number.";
+      else if (addPausedContact(d)) reply = `Paused replies to ...${d.slice(-4)}. Send /resume ${d} to bring it back.`;
+      else reply = `Already paused for ...${d.slice(-4)}.`;
+    } else {
+      try { fs.writeFileSync(PAUSE_FILE, 'indefinite\n'); } catch {}
+      reply = "Paused. I won't reply to anyone until you send /resume.";
+    }
+
   } else if (cmd === '/resume' || cmd === '/start' || cmd === '/on') {
-    try { fs.rmSync(PAUSE_FILE, { force: true }); } catch {}
-    reply = 'Back on. Replying normally again.';
+    if (arg) {
+      const d = onlyDigits(arg);
+      if (!d) reply = "I couldn't read that number.";
+      else if (removePausedContact(d)) reply = `Resumed replies to ...${d.slice(-4)}.`;
+      else reply = `...${d.slice(-4)} wasn't paused.`;
+    } else {
+      try { fs.rmSync(PAUSE_FILE, { force: true }); } catch {}
+      reply = 'Back on. Replying normally again.';
+    }
+
+  } else if (cmd === '/quiet') {
+    const n = parseInt(arg, 10);
+    if (!n || n <= 0) reply = 'Usage: /quiet <minutes>  (e.g. /quiet 30, /quiet 120)';
+    else {
+      const untilMs = Date.now() + n * 60000;
+      try { fs.writeFileSync(PAUSE_FILE, new Date(untilMs).toISOString() + '\n'); } catch {}
+      reply = `Quiet for ${n} min. Auto-resume around ${new Date(untilMs).toLocaleTimeString()}.`;
+    }
+
+  } else if (cmd === '/list') {
+    const a = [...allowSet()];
+    const b = [...blockSet()];
+    const m = listMode();
+    const fmt = (arr) => (arr.length ? arr.map((x) => '...' + x.slice(-4)).join(', ') : '(empty)');
+    if (m === 'allow') reply = `Mode: allow (only these can reply, ${a.length}):\n${fmt(a)}`;
+    else if (m === 'block') reply = `Mode: block (these are blocked, ${b.length}):\n${fmt(b)}`;
+    else reply = `Mode: open (replying to everyone). allow has ${a.length}, block has ${b.length}.`;
+
+  } else if (cmd === '/add') {
+    const d = onlyDigits(arg);
+    if (!d) reply = 'Usage: /add <number with country code, digits only>';
+    else if (addAllowed(d)) reply = `Added ...${d.slice(-4)} to the allow-list.`;
+    else reply = `...${d.slice(-4)} is already on the allow-list.`;
+
+  } else if (cmd === '/remove') {
+    const d = onlyDigits(arg);
+    if (!d) reply = 'Usage: /remove <number>';
+    else if (removeAllowed(d)) reply = `Removed ...${d.slice(-4)} from the allow-list.`;
+    else reply = `...${d.slice(-4)} wasn't on the allow-list.`;
+
+  } else if (cmd === '/mode') {
+    const m = arg.toLowerCase();
+    if (!['allow', 'block', 'open'].includes(m)) reply = 'Usage: /mode allow|block|open';
+    else { setListMode(m); reply = `Mode set to ${m}.`; }
+
+  } else if (cmd === '/note') {
+    const sp2 = arg.indexOf(' ');
+    const numPart = sp2 === -1 ? arg : arg.slice(0, sp2);
+    const noteText = sp2 === -1 ? '' : arg.slice(sp2 + 1).trim();
+    const d = onlyDigits(numPart);
+    if (!d) reply = 'Usage: /note <number> <text>   (empty text to clear)';
+    else if (!noteText) {
+      const existing = getNote(d);
+      reply = existing ? `Note for ...${d.slice(-4)}: ${existing}` : `No note for ...${d.slice(-4)}.`;
+    } else {
+      setNote(d, noteText);
+      reply = `Note saved for ...${d.slice(-4)}.`;
+    }
+
+  } else if (cmd === '/notes') {
+    const d = onlyDigits(arg);
+    if (!d) reply = 'Usage: /notes <number>';
+    else {
+      const n = getNote(d);
+      reply = n ? `Note for ...${d.slice(-4)}: ${n}` : `No note for ...${d.slice(-4)}.`;
+    }
+
+  } else if (cmd === '/reload') {
+    try {
+      reloadPersona();
+      reply = `Reloaded persona "${persona.name}" - ${persona.examples.length} examples, tz ${persona.timezone}.`;
+    } catch (e) {
+      reply = 'Reload failed: ' + e.message;
+    }
+
   } else {
     reply = 'Unknown command. Send /help for options.';
   }
+
   log('CMD', cmd, '->', reply.split('\n')[0]);
   try {
     await sendWhatsApp(chatId, reply + ' --AI'); // --AI suffix = loop-guard (gateway skips our own tagged sends)
@@ -412,6 +636,19 @@ function loadEmbeddings() {
   }
 }
 // retrieve top-K semantically-similar PAST messages for this sender; fail-open -> []
+// past messages that themselves look like questions carry less factual value than statements;
+// when someone asks 'do you remember X', we want to surface the STATEMENT they made, not other recall questions.
+function looksLikeQuestion(text) {
+  const t = (text || '').trim().toLowerCase();
+  if (!t) return false;
+  if (t.endsWith('?')) return true;
+  // question / meta-imperative openers
+  if (/^(who|what|when|where|why|how|which|do|did|does|is|are|was|were|can|could|would|should|will|may|might|have|has|explain|tell|show|describe|ask|answer|let me)\b/.test(t)) return true;
+  // recall / meta-conversation phrases anywhere (they're asking ABOUT earlier, not carrying content)
+  if (/\b(do you remember|did you|did i|i asked|you said|what i asked|what i said|do you recall|remember when|you asked)\b/.test(t)) return true;
+  return false;
+}
+
 async function retrieve(sender, queryText, k = RETRIEVE_K, exclude = new Set()) {
   if (!EMBED_ENABLED) return [];
   try {
@@ -426,6 +663,9 @@ async function retrieve(sender, queryText, k = RETRIEVE_K, exclude = new Set()) 
       if (exclude.has(c.text)) continue; // don't re-inject what's already in the recent window
       const sim = dot(qv, c.vec);
       if (sim < RETRIEVE_MIN_SCORE) continue;
+      // skip past messages that are themselves questions - they're rarely the ANSWER to anything.
+      // (We want statements/specifics surfaced, especially for 'do you remember' queries.)
+      if (looksLikeQuestion(c.text)) continue;
       // tiny recency tiebreak (<=0.02), never overrides a clearly better semantic match
       const ageDays = (now - (c.ts || now)) / (1000 * 60 * 60 * 24);
       const score = sim + Math.max(0, 0.02 * (1 - ageDays / 30));
@@ -525,6 +765,12 @@ async function worker() {
       } catch (e) {
         log('RAG skip', e.message);
       }
+      // per-contact note (a durable fact you keep about them); injected as extra system context
+      const note = getNote(job.sender);
+      if (note) {
+        const noteBlock = 'Note you keep about this person (use it naturally - never mention you have a note): ' + note;
+        extraSystem = extraSystem ? extraSystem + '\n\n' + noteBlock : noteBlock;
+      }
       // time-of-day awareness + graceful restart when the thread has gone cold
       const tod = timeContext();
       let timeHint = `for context, right now it is ${tod} where they are.`;
@@ -539,9 +785,9 @@ async function worker() {
       if (reply) {
         remember(job.sender, 'model', reply);
         embedAndStore(job.sender, 'model', reply); // fire-and-forget long-term write
-        const wait = humanDelay(reply.length);
-        log('...', mask(job.sender), `waiting ${(wait / 1000).toFixed(1)}s`);
-        await sleep(wait);
+        // self-chat (testing/console): skip the human-like typing delay so iteration is fast
+        const wait = job.sender === SELF_NUMBER ? 0 : humanDelay(reply.length);
+        if (wait) { log('...', mask(job.sender), `waiting ${(wait / 1000).toFixed(1)}s`); await sleep(wait); }
         const outText = job.sender === SELF_NUMBER ? reply + ' --AI' : reply; // tag self-chat test replies
         await sendWhatsApp(job.chatId, outText);
         log('OUT', mask(job.sender), JSON.stringify(reply.slice(0, 80)));
@@ -557,25 +803,33 @@ async function worker() {
 
 // ---- debounce: people send several bubbles in a row; wait for them to finish, reply once ----
 const DEBOUNCE_MS = 12000; // ~12s of silence = they're done typing (people send several bubbles, spaced out)
+const SELF_DEBOUNCE_MS = 1500; // self-chat (testing/console): much shorter so iteration is fast
 const pending = new Map();
 
 function handle(payload) {
   const m = (payload && payload.data) || {};
   if (!m.from || m.fromMe || m.isGroup) return; // ignore our own sends, groups, junk
   let sender = onlyDigits(m.from);
-  if (!allowSet().has(sender)) {
-    // m.from may be a LID (WhatsApp privacy id) rather than the phone number; resolve via contacts.
-    const real = _contacts.lidToReal.get(sender);
-    if (real && allowSet().has(real)) {
-      log('resolved LID', mask(m.from), '->', mask(real));
-      sender = real; // identity/memory key = real number; reply still goes to m.chatId (the @lid)
-    } else {
+  // canonicalize: if this is a known LID, switch sender to the real number for memory/notes/etc.
+  const real = _contacts.lidToReal.get(sender);
+  const rawSender = sender;
+  if (real) { log('resolved LID', mask(m.from), '->', mask(real)); sender = real; }
+
+  // mode-aware gate: 'allow' (default - only listed reply), 'block' (everyone except listed), 'open' (everyone)
+  const mode = listMode();
+  if (mode === 'allow') {
+    if (!allowSet().has(sender) && !allowSet().has(rawSender)) {
       return log('skip (not allow-listed)', mask(m.from));
     }
-  }
+  } else if (mode === 'block') {
+    if (blockSet().has(sender) || blockSet().has(rawSender)) {
+      return log('skip (blocked)', mask(sender));
+    }
+  } // 'open' -> no gate
+
   const text = (m.body || '').trim();
   if (!text) return;
-  // self-chat command console: owner-only, '/'-prefixed (or bare help/menu). Handled before the pause gate so /resume always works.
+  // self-chat command console: owner-only, '/'-prefixed (or bare help/menu). Runs BEFORE pause gates so /resume always works.
   if (sender === SELF_NUMBER && SELF_NUMBER && (text.startsWith('/') || text.toLowerCase() === 'help' || text.toLowerCase() === 'menu')) {
     handleCommand(text, m.chatId);
     return;
@@ -583,6 +837,7 @@ function handle(payload) {
   log('IN ', mask(m.from), JSON.stringify(text.slice(0, 80)));
   chatlog('in', sender, text);
   if (isPaused()) return log('skip (paused)', mask(sender));
+  if (pausedContacts().has(sender)) return log('skip (contact paused)', mask(sender)); // human handoff
   let p = pending.get(sender);
   if (!p) {
     p = { chatId: m.chatId, from: m.from, msgs: [], timer: null };
@@ -598,7 +853,7 @@ function handle(payload) {
     log('settled', mask(sender), `${p.msgs.length} msg(s) -> reply`);
     queue.push({ chatId: p.chatId, text: combined, from: p.from, sender });
     worker();
-  }, DEBOUNCE_MS);
+  }, sender === SELF_NUMBER ? SELF_DEBOUNCE_MS : DEBOUNCE_MS);
 }
 
 http
@@ -625,6 +880,9 @@ http
           timezone: persona.timezone,
           retrieveRoles: [...RETRIEVE_ROLES],
           paused: isPaused(),
+          mode: listMode(),
+          blockCount: blockSet().size,
+          pausedContacts: pausedContacts().size,
         }),
       );
     }
